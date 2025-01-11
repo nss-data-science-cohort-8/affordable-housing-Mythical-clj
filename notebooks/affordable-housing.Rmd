@@ -1,0 +1,137 @@
+---
+title: "Affordable Housing"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(glue)
+library(sf)
+```
+
+1. filtered_sales.csv:
+	* Contains sales of single family homes from 1995 to October of 2022. 
+	* Non arms-length transactions and transactions for parcels which did not have a house on them at the time of sale. This was done by removing any transactions for $0, any transactions for which the adjacent appraisal values showed $0 for improvements, and any for which the transaction amount was less than half of the adjacent appraisals. 
+	* Optional: If you would like to work with the full dataset, all transactions are contained in full_sales.csv and the assessment values are in assessment.csv.
+	
+```{r}
+filtered_sales <- read_csv('../data/filtered_sales.csv')
+
+filtered_sales
+```
+	
+	
+	2. LIHTC.csv
+	* Details of affordable housing developments funded by the LIHTC program.
+	* Refer to the included data dictionary for variable descriptions.
+
+```{r}
+lihtc <- read_csv('../data/LIHTC.csv') |> 
+  rename_all(tolower)
+
+lihtc
+```
+	
+	
+	3. barnes.csv
+	* Contains information on rental properties that are completed and have more than 10 units which were funded by the Barnes Fund.
+
+```{r}
+barnes <- read_csv('../data/barnes.csv') |> 
+  rename(latitude = lat, longitude = lng)
+
+barnes
+```
+
+
+
+4. property_details.csv
+	* Contains detailed information on each property, including year built, square footage, number of rooms, and location (lat/lng)
+	
+	
+```{r}
+prop_details <- read_csv('../data/property_details.csv')
+
+prop_details
+```
+	
+	For this project, you'll mimic the methodology of the working paper ["Does Federally Subsidized Rental Housing Depress Neighborhood Property Values?"](https://furmancenter.org/research/publication/does-federally-subsidized-rental-housing-depress-neighborhood-property), building a statistical model to explore the effect on sales price of a home nearby to an affordable housing development and using a difference in differences approach.
+	
+```{r}
+detailed_sales <- right_join(prop_details, filtered_sales) |> 
+  mutate(
+    longitude = as.numeric(str_extract(centroid, "\\((.+),", group = 1)),
+    latitude = as.numeric(str_extract(centroid, ",(.+)\\)", group = 1)
+                           )) |> 
+  select(-centroid)
+
+detailed_sales
+```
+	
+	
+	Look at the Park at Richards Road Apartments, which are contained in LIHTC.csv and have a HUD ID of TNA20130015. These were allocated in 2012 and placed in service in 2013.
+
+```{r}
+lihtc |> 
+  filter(hud_id == 'TNA20130015')
+```
+
+
+
+Find all homes that are less than 2000 feet from this development (our "treatment" group) and all homes that are between 2000 and 3000 feet from this development (our "control" group). For these homes, find all sales that took place between 5 and 1 year before this development was allocated and all sales for 1 to 5 years after it was placed in service. You can use these as the "pre" and "post" sales.
+
+
+```{r}
+st_as_sf(detailed_sales)
+
+
+```
+
+
+
+Use a difference in differences approach to estimate whether this development had an impact on sales prices. Start with a basic model for the sales amount based on the pre/post and treatment/control variables only. Can we conclude that the sales price for nearby homes was affected by the development?
+
+```{r}
+
+```
+
+
+
+After doing this basic model, you might try adding some predictors to your model, like the square footage or age of the home. You might also try using the log of the sales price as the target.
+
+
+```{r}
+
+```
+
+
+
+Finally, try instead of using a binary variable for before or after to use a tpost variable indicating the number of years before or after the development that the sale took place. Do your conclusions change?
+
+
+```{r}
+
+```
+
+Modify your code so that it works on other developments. Are your findings the same? 
+
+```{r}
+
+```
+
+
+Next, rather than focusing on a single development at time, modify your model to consider all housing developments. Note that you'll likely want to include the sales year as an explanatory variable in your model.
+
+
+```{r}
+
+```
+
+
+
+**Bonus:** [Assessing the Impact of Affordable Housing on Nearby Property Values in Alexandria, Virginia](https://www.urban.org/research/publication/assessing-impact-affordable-housing-nearby-property-values-alexandria-virginia) also looks at the impact of affordable housing developments on nearby property values, but uses a different model which focuses only on homes that were sold both before and after the development was placed in service. Use a similar setup to analyze the data from Davidson County.
+
+```{r}
+
+```
+
