@@ -7,6 +7,7 @@ output: html_notebook
 library(tidyverse)
 library(glue)
 library(sf)
+library(lubridate)
 ```
 
 1. filtered_sales.csv:
@@ -63,6 +64,7 @@ detailed_sales <- right_join(prop_details, filtered_sales) |>
     longitude = as.numeric(str_extract(centroid, "\\((.+),", group = 1)),
     latitude = as.numeric(str_extract(centroid, ",(.+)\\)", group = 1)
                            )) |> 
+    mutate(ownerdate = ymd(ownerdate)) |> 
   select(-centroid)
 
 detailed_sales
@@ -70,31 +72,104 @@ detailed_sales
 	
 	
 	Look at the Park at Richards Road Apartments, which are contained in LIHTC.csv and have a HUD ID of TNA20130015. These were allocated in 2012 and placed in service in 2013.
-
 ```{r}
-lihtc |> 
-  filter(hud_id == 'TNA20130015')
+hud <- 'TNA20130015'
 ```
-
 
 
 Find all homes that are less than 2000 feet from this development (our "treatment" group) and all homes that are between 2000 and 3000 feet from this development (our "control" group). For these homes, find all sales that took place between 5 and 1 year before this development was allocated and all sales for 1 to 5 years after it was placed in service. You can use these as the "pre" and "post" sales.
 
 
 ```{r}
-st_as_sf(detailed_sales)
-
-
+detailed_sales_sf <- st_as_sf(
+  detailed_sales,
+  coords = c("longitude", "latitude"), 
+  crs = st_crs(4326)
+  )
 ```
 
+```{r}
+lihtc_sf <- st_as_sf(
+  lihtc,
+  coords = c('longitude', 'latitude'), 
+  crs = st_crs(4326)
+  )
+```
 
+```{r}
+lihtc_sf_example <- lihtc_sf |> 
+  filter(hud_id == hud)
+
+lihtc_sf_example
+```
+
+```{r}
+detailed_sales_sf <- detailed_sales_sf |> 
+  mutate(
+    distance_in_feet = as.numeric(
+      st_distance(
+        geometry, st_geometry(
+          lihtc_sf_example
+          )
+        ) * 3.28084
+      )
+    )  
+  
+```
+
+```{r}
+pre_treatment = detailed_sales_sf |> 
+  filter(distance_in_feet < 2000) |> 
+   filter(between(ownerdate, 
+                 as.Date('2007-01-01'), 
+                 as.Date('2012-01-01')
+                 )
+          )
+```
+
+```{r}
+post_treatment = detailed_sales_sf |> 
+  filter(distance_in_feet < 2000) |> 
+   filter(between(ownerdate, 
+                 as.Date('2013-01-01'), 
+                 as.Date('2018-01-01')
+                 )
+          )
+```
+
+```{r}
+pre_control = detailed_sales_sf |> 
+  filter(between(distance_in_feet, 
+                 2000, 
+                 3000)
+         ) |> 
+  filter(between(ownerdate, 
+                 as.Date('2007-01-01'), 
+                 as.Date('2012-01-01')
+                 )
+          )
+```
+
+```{r}
+post_control = detailed_sales_sf |> 
+  filter(between(distance_in_feet, 
+                 2000, 
+                 3000)
+         ) |> 
+  filter(between(ownerdate, 
+                 as.Date('2013-01-01'), 
+                 as.Date('2018-01-01')
+                 )
+          )
+```
 
 Use a difference in differences approach to estimate whether this development had an impact on sales prices. Start with a basic model for the sales amount based on the pre/post and treatment/control variables only. Can we conclude that the sales price for nearby homes was affected by the development?
 
 ```{r}
 
-```
 
+
+```
 
 
 After doing this basic model, you might try adding some predictors to your model, like the square footage or age of the home. You might also try using the log of the sales price as the target.
@@ -104,6 +179,13 @@ After doing this basic model, you might try adding some predictors to your model
 
 ```
 
+```{r}
+
+```
+
+```{r}
+
+```
 
 
 Finally, try instead of using a binary variable for before or after to use a tpost variable indicating the number of years before or after the development that the sale took place. Do your conclusions change?
