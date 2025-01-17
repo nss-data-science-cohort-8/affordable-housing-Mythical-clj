@@ -7,7 +7,6 @@ output: html_notebook
 library(tidyverse)
 library(glue)
 library(sf)
-library(lubridate)
 ```
 
 1. filtered_sales.csv:
@@ -28,8 +27,11 @@ filtered_sales
 
 ```{r}
 lihtc <- read_csv('../data/LIHTC.csv') |> 
-  rename_all(tolower)
-
+  rename_all(tolower) |> 
+  mutate_at(vars(yr_pis, yr_alloc), ~na_if(., 8888)) |>
+  mutate_at(vars(yr_pis, yr_alloc), ~na_if(., 9999)) |> 
+  mutate(yr_pis = ymd(paste(yr_pis, '01-01', sep = '-'))) |> 
+  mutate(yr_alloc = ymd(paste(yr_alloc, '01-01', sep='-')))
 lihtc
 ```
 	
@@ -59,16 +61,23 @@ prop_details
 	For this project, you'll mimic the methodology of the working paper ["Does Federally Subsidized Rental Housing Depress Neighborhood Property Values?"](https://furmancenter.org/research/publication/does-federally-subsidized-rental-housing-depress-neighborhood-property), building a statistical model to explore the effect on sales price of a home nearby to an affordable housing development and using a difference in differences approach.
 	
 ```{r}
-detailed_sales <- right_join(prop_details, filtered_sales) |> 
+detailed_sales <- right_join(prop_details, filtered_sales, by='apn') |> 
   mutate(
-    longitude = as.numeric(str_extract(centroid, "\\((.+),", group = 1)),
-    latitude = as.numeric(str_extract(centroid, ",(.+)\\)", group = 1)
+    longitude = as.numeric(str_extract(centroid, 
+                                       "\\((.+),", group = 1)),
+    latitude = as.numeric(str_extract(centroid, 
+                                      ",(.+)\\)", group = 1)
                            )) |> 
     mutate(ownerdate = ymd(ownerdate)) |> 
   select(-centroid)
 
 detailed_sales
 ```
+```{r}
+huds <- lihtc |> 
+  pull(hud_id)
+```
+
 	
 	
 	Look at the Park at Richards Road Apartments, which are contained in LIHTC.csv and have a HUD ID of TNA20130015. These were allocated in 2012 and placed in service in 2013.
@@ -83,7 +92,7 @@ Find all homes that are less than 2000 feet from this development (our "treatmen
 ```{r}
 detailed_sales_sf <- st_as_sf(
   detailed_sales,
-  coords = c("longitude", "latitude"), 
+  coords = c('longitude', 'latitude'), 
   crs = st_crs(4326)
   )
 ```
@@ -97,10 +106,91 @@ lihtc_sf <- st_as_sf(
 ```
 
 ```{r}
+barnes_sf <- st_as_sf(
+  barnes,
+  coords = c('longitude', 'latitude'), 
+  crs = st_crs(4326)
+  )
+```
+
+
+```{r}
 lihtc_sf_example <- lihtc_sf |> 
   filter(hud_id == hud)
 
 lihtc_sf_example
+```
+```{r}
+affordable_func <-  function(x) {
+  example <- lihtc_sf |> 
+    filter(hud_id == x)
+  ditance <- detailed_sales_sf |> 
+  mutate(
+    distance_in_feet = as.numeric(
+      st_distance(
+        geometry, st_geometry(
+          example
+          )
+        ) * 3.28084
+      )
+    )  
+  pre_start = as.Date(example$yr_alloc - years(5))
+  pre_stop = as.Date(example$yr_alloc - years(1))
+
+  post_start =  as.Date(years(1) + example$yr_pis)
+  post_stop = as.Date(years(5) + example$yr_pis)
+
+  treat_dist = 2000
+  control_dist = 3000
+  
+  pre_treatment = detailed_sales_sf |> 
+  filter(distance_in_feet < treat_dist) |> 
+   filter(between(ownerdate, 
+                  pre_start, 
+                  pre_stop
+                 )
+          )
+  post_treatment = detailed_sales_sf |> 
+  filter(distance_in_feet < treat_dist) |> 
+   filter(between(ownerdate, 
+                  post_start, 
+                  post_stop
+                 )
+          )
+  pre_control = detailed_sales_sf |> 
+  filter(between(distance_in_feet, 
+                 treat_dist, 
+                 control_dist)) |> 
+  filter(between(ownerdate, 
+                 pre_start, 
+                 pre_stop
+                 )
+          )
+  post_control = detailed_sales_sf |> 
+  filter(between(distance_in_feet, 
+                 treat_dist, 
+                 control_dist)) |> 
+  filter(between(ownerdate, 
+                 post_start, 
+                 post_stop
+                 )
+          )
+  combined_data <- bind_rows(
+  mutate(pre_control, group = "Control", time = "Pre"),
+  mutate(post_control, group = "Control", time = "Post"),
+  mutate(pre_treatment, group = "Treatment", time = "Pre"),
+  mutate(post_treatment, group = "Treatment", time = "Post")
+)
+  combined_data <- combined_data |> 
+    mutate(time = factor(time, levels = c('Pre', 'Post')))
+ 
+}
+```
+
+```{r}
+huds_combine <- map(huds, affordable_func)
+
+huds_bind <- bind_rows(huds_combine)
 ```
 
 ```{r}
@@ -118,21 +208,40 @@ detailed_sales_sf <- detailed_sales_sf |>
 ```
 
 ```{r}
+detailed_sales_sf |> 
+  filter(distance_in_feet < 2000)
+```
+```{r}
+pre_start = as.Date(lihtc_sf_example$yr_alloc - years(5))
+pre_stop = as.Date(lihtc_sf_example$yr_alloc - years(0))
+
+post_start =  as.Date(years(2) + lihtc_sf_example$yr_pis)
+post_stop = as.Date(years(7) + lihtc_sf_example$yr_pis)
+
+treat_dist = 2000
+control_dist = 3000
+```
+
+```{r}
+
+```
+
+```{r}
 pre_treatment = detailed_sales_sf |> 
-  filter(distance_in_feet < 2000) |> 
+  filter(distance_in_feet < treat_dist) |> 
    filter(between(ownerdate, 
-                 as.Date('2007-01-01'), 
-                 as.Date('2012-01-01')
+                  pre_start, 
+                  pre_stop
                  )
           )
 ```
 
 ```{r}
 post_treatment = detailed_sales_sf |> 
-  filter(distance_in_feet < 2000) |> 
+  filter(distance_in_feet < treat_dist) |> 
    filter(between(ownerdate, 
-                 as.Date('2013-01-01'), 
-                 as.Date('2018-01-01')
+                  post_start, 
+                  post_stop
                  )
           )
 ```
@@ -140,12 +249,11 @@ post_treatment = detailed_sales_sf |>
 ```{r}
 pre_control = detailed_sales_sf |> 
   filter(between(distance_in_feet, 
-                 2000, 
-                 3000)
-         ) |> 
+                 treat_dist, 
+                 control_dist)) |> 
   filter(between(ownerdate, 
-                 as.Date('2007-01-01'), 
-                 as.Date('2012-01-01')
+                 pre_start, 
+                 pre_stop
                  )
           )
 ```
@@ -153,12 +261,11 @@ pre_control = detailed_sales_sf |>
 ```{r}
 post_control = detailed_sales_sf |> 
   filter(between(distance_in_feet, 
-                 2000, 
-                 3000)
-         ) |> 
+                 treat_dist, 
+                 control_dist)) |> 
   filter(between(ownerdate, 
-                 as.Date('2013-01-01'), 
-                 as.Date('2018-01-01')
+                 post_start, 
+                 post_stop
                  )
           )
 ```
@@ -166,25 +273,47 @@ post_control = detailed_sales_sf |>
 Use a difference in differences approach to estimate whether this development had an impact on sales prices. Start with a basic model for the sales amount based on the pre/post and treatment/control variables only. Can we conclude that the sales price for nearby homes was affected by the development?
 
 ```{r}
-
-
-
+combined_data <- bind_rows(
+  mutate(pre_control, group = "Control", time = "Pre"),
+  mutate(post_control, group = "Control", time = "Post"),
+  mutate(pre_treatment, group = "Treatment", time = "Pre"),
+  mutate(post_treatment, group = "Treatment", time = "Post")
+)
+combined_data <- combined_data |> 
+  mutate(time = factor(time, levels = c('Pre', 'Post')))
 ```
 
+```{r}
+model <-  glm(amount ~ group + time + (group:time), 
+              data = combined_data)
+
+summary(model)
+```
+```{r}
+combined_data |> 
+  group_by(group, time) |> 
+  summarize(amount = mean(amount),)
+```
 
 After doing this basic model, you might try adding some predictors to your model, like the square footage or age of the home. You might also try using the log of the sales price as the target.
 
 
 ```{r}
+age_model <-  glm(amount ~ year_built + group + time + (group:time), data = combined_data)
 
+summary(age_model)
 ```
 
 ```{r}
+sq_model <-  glm(amount ~ square_footage + group + time + (group:time), data = combined_data)
 
+summary(sq_model)
 ```
 
 ```{r}
+log_model <-  glm(log(amount) ~ group + time + (group:time), data = combined_data)
 
+summary(log_model)
 ```
 
 
@@ -192,7 +321,9 @@ Finally, try instead of using a binary variable for before or after to use a tpo
 
 
 ```{r}
+t_post_model <- glm(amount ~ time + I(ownerdate - 2013) + time:I(ownerdate - 2013), data = combined_data)
 
+summary(t_post_model)
 ```
 
 Modify your code so that it works on other developments. Are your findings the same? 
@@ -206,7 +337,8 @@ Next, rather than focusing on a single development at time, modify your model to
 
 
 ```{r}
-
+glm(amount ~ time + group + C(year(ownerdate)) + (time:group), data = huds_bind) |> 
+  summary() 
 ```
 
 
