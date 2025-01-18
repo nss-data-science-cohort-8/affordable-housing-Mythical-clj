@@ -31,7 +31,16 @@ lihtc <- read_csv('../data/LIHTC.csv') |>
   mutate_at(vars(yr_pis, yr_alloc), ~na_if(., 8888)) |>
   mutate_at(vars(yr_pis, yr_alloc), ~na_if(., 9999)) |> 
   mutate(yr_pis = ymd(paste(yr_pis, '01-01', sep = '-'))) |> 
-  mutate(yr_alloc = ymd(paste(yr_alloc, '01-01', sep='-')))
+  mutate(yr_alloc = ymd(paste(yr_alloc, '01-01', sep='-'))) |>
+  select(hud_id, 
+         project, 
+         proj_add, 
+         proj_zip,
+         allocamt,
+         latitude, 
+         longitude, 
+         yr_pis, 
+         yr_alloc)
 lihtc
 ```
 	
@@ -41,7 +50,11 @@ lihtc
 
 ```{r}
 barnes <- read_csv('../data/barnes.csv') |> 
-  rename(latitude = lat, longitude = lng)
+  rename(latitude = lat, longitude = lng) |> 
+  select(latitude, 
+          longitude, 
+          `Barnes Year`, 
+          `Affordability Term Start Date`)
 
 barnes
 ```
@@ -74,7 +87,7 @@ detailed_sales <- right_join(prop_details, filtered_sales, by='apn') |>
 detailed_sales
 ```
 ```{r}
-huds <- lihtc |> 
+lihtc_huds <- lihtc |> 
   pull(hud_id)
 ```
 
@@ -95,6 +108,8 @@ detailed_sales_sf <- st_as_sf(
   coords = c('longitude', 'latitude'), 
   crs = st_crs(4326)
   )
+detailed_sales_sf |> 
+  slice_head(n=1)
 ```
 
 ```{r}
@@ -103,6 +118,9 @@ lihtc_sf <- st_as_sf(
   coords = c('longitude', 'latitude'), 
   crs = st_crs(4326)
   )
+
+lihtc_sf |> 
+  head(1)
 ```
 
 ```{r}
@@ -110,7 +128,13 @@ barnes_sf <- st_as_sf(
   barnes,
   coords = c('longitude', 'latitude'), 
   crs = st_crs(4326)
-  )
+  ) |>
+  mutate(hud_id = as.character(row_number())) |> 
+  rename(yr_alloc = `Barnes Year`, yr_pis = `Affordability Term Start Date`) |> 
+  mutate(yr_alloc = ymd(paste(yr_alloc, '01-01', sep='-')))
+
+barnes_sf |> 
+  head(1)
 ```
 
 
@@ -120,11 +144,19 @@ lihtc_sf_example <- lihtc_sf |>
 
 lihtc_sf_example
 ```
+
 ```{r}
-affordable_func <-  function(x) {
-  example <- lihtc_sf |> 
-    filter(hud_id == x)
-  ditance <- detailed_sales_sf |> 
+lihtc_barnes <- bind_rows(lihtc_sf, barnes_sf)
+
+lihtc_barnes
+```
+
+
+```{r}
+affordable_func <-  function(id) {
+  example <- lihtc_barnes |> 
+    filter(hud_id == id)
+  detailed_sales_sf <- detailed_sales_sf |> 
   mutate(
     distance_in_feet = as.numeric(
       st_distance(
@@ -133,25 +165,25 @@ affordable_func <-  function(x) {
           )
         ) * 3.28084
       )
-    )  
+    )
   pre_start = as.Date(example$yr_alloc - years(5))
-  pre_stop = as.Date(example$yr_alloc - years(1))
+  pre_stop = as.Date(example$yr_alloc - years(0))
 
-  post_start =  as.Date(years(1) + example$yr_pis)
-  post_stop = as.Date(years(5) + example$yr_pis)
+  post_start =  as.Date(years(2) + example$yr_pis)
+  post_stop = as.Date(years(7) + example$yr_pis)
 
   treat_dist = 2000
   control_dist = 3000
   
   pre_treatment = detailed_sales_sf |> 
-  filter(distance_in_feet < treat_dist) |> 
+  filter(distance_in_feet <= treat_dist) |> 
    filter(between(ownerdate, 
                   pre_start, 
                   pre_stop
                  )
           )
   post_treatment = detailed_sales_sf |> 
-  filter(distance_in_feet < treat_dist) |> 
+  filter(distance_in_feet <= treat_dist) |> 
    filter(between(ownerdate, 
                   post_start, 
                   post_stop
@@ -183,15 +215,16 @@ affordable_func <-  function(x) {
 )
   combined_data <- combined_data |> 
     mutate(time = factor(time, levels = c('Pre', 'Post')))
- 
 }
 ```
 
-```{r}
-huds_combine <- map(huds, affordable_func)
 
-huds_bind <- bind_rows(huds_combine)
+```{r}
+lihtc_barnes_huds <- lihtc_barnes |> 
+  pull(hud_id)
 ```
+
+Function broken down to individual code for computing just the example hud_id
 
 ```{r}
 detailed_sales_sf <- detailed_sales_sf |> 
@@ -207,63 +240,71 @@ detailed_sales_sf <- detailed_sales_sf |>
   
 ```
 
+Checking tibble for accuracy
+
 ```{r}
 detailed_sales_sf |> 
-  filter(distance_in_feet < 2000)
+  filter(distance_in_feet < 200)
 ```
-```{r}
-pre_start = as.Date(lihtc_sf_example$yr_alloc - years(5))
-pre_stop = as.Date(lihtc_sf_example$yr_alloc - years(0))
+Creates objects for time and group for use in variable tibble creation
 
-post_start =  as.Date(years(2) + lihtc_sf_example$yr_pis)
-post_stop = as.Date(years(7) + lihtc_sf_example$yr_pis)
+```{r}
+pre_start = year(lihtc_sf_example$yr_alloc - years(5))
+pre_stop = year(lihtc_sf_example$yr_alloc - years(1))
+
+post_start =  year(years(1) + lihtc_sf_example$yr_pis)
+post_stop = year(years(5) + lihtc_sf_example$yr_pis)
 
 treat_dist = 2000
 control_dist = 3000
 ```
 
-```{r}
 
-```
 
 ```{r}
 pre_treatment = detailed_sales_sf |> 
-  filter(distance_in_feet < treat_dist) |> 
-   filter(between(ownerdate, 
+  filter(distance_in_feet <= treat_dist) |> 
+   filter(between(year(ownerdate), 
                   pre_start, 
                   pre_stop
                  )
           )
 ```
 
+
+
 ```{r}
 post_treatment = detailed_sales_sf |> 
-  filter(distance_in_feet < treat_dist) |> 
-   filter(between(ownerdate, 
+  filter(distance_in_feet <= treat_dist) |> 
+   filter(between(year(ownerdate), 
                   post_start, 
                   post_stop
                  )
           )
 ```
 
+
+
 ```{r}
 pre_control = detailed_sales_sf |> 
   filter(between(distance_in_feet, 
                  treat_dist, 
                  control_dist)) |> 
-  filter(between(ownerdate, 
+  filter(between(year(ownerdate), 
                  pre_start, 
                  pre_stop
                  )
           )
 ```
 
+
+
 ```{r}
 post_control = detailed_sales_sf |> 
   filter(between(distance_in_feet, 
                  treat_dist, 
                  control_dist)) |> 
-  filter(between(ownerdate, 
+  filter(between(year(ownerdate), 
                  post_start, 
                  post_stop
                  )
@@ -283,38 +324,50 @@ combined_data <- combined_data |>
   mutate(time = factor(time, levels = c('Pre', 'Post')))
 ```
 
-```{r}
-model <-  glm(amount ~ group + time + (group:time), 
-              data = combined_data)
 
-summary(model)
-```
+
 ```{r}
 combined_data |> 
   group_by(group, time) |> 
-  summarize(amount = mean(amount),)
+  summarize(amount = mean(amount), n())
+```
+
+
+
+```{r}
+model <-  lm(amount ~ group + time + (group:time), 
+              data = combined_data)
+
+summary(model)
 ```
 
 After doing this basic model, you might try adding some predictors to your model, like the square footage or age of the home. You might also try using the log of the sales price as the target.
 
 
+
 ```{r}
-age_model <-  glm(amount ~ year_built + group + time + (group:time), data = combined_data)
+age_model <-  lm(amount ~ year_built + group + time + (group:time), data = combined_data)
 
 summary(age_model)
 ```
 
 ```{r}
-sq_model <-  glm(amount ~ square_footage + group + time + (group:time), data = combined_data)
+sq_model <-  lm(amount ~ square_footage + group + time + (group:time), data = combined_data)
 
 summary(sq_model)
 ```
 
 ```{r}
-log_model <-  glm(log(amount) ~ group + time + (group:time), data = combined_data)
+log_model <-  lm(log(amount) ~ group + time + group:time + square_footage + year_built + building_condition, data = combined_data)
 
 summary(log_model)
 ```
+```{r}
+combined_data |> 
+  ggplot(aes(x = log(amount))) +
+  geom_histogram()
+```
+
 
 
 Finally, try instead of using a binary variable for before or after to use a tpost variable indicating the number of years before or after the development that the sale took place. Do your conclusions change?
@@ -335,13 +388,19 @@ Modify your code so that it works on other developments. Are your findings the s
 
 Next, rather than focusing on a single development at time, modify your model to consider all housing developments. Note that you'll likely want to include the sales year as an explanatory variable in your model.
 
-
 ```{r}
-glm(amount ~ time + group + C(year(ownerdate)) + (time:group), data = huds_bind) |> 
-  summary() 
+li_ba_map <- map(lihtc_barnes_huds, 
+                 affordable_func, 
+                 .progress = TRUE)
+
+li_ba_bind <- bind_rows(li_ba_map)
 ```
 
 
+```{r}
+glm(amount ~ time + group + C(year(ownerdate)) + (time:group), data = li_ba_bind) |> 
+  summary()
+```
 
 **Bonus:** [Assessing the Impact of Affordable Housing on Nearby Property Values in Alexandria, Virginia](https://www.urban.org/research/publication/assessing-impact-affordable-housing-nearby-property-values-alexandria-virginia) also looks at the impact of affordable housing developments on nearby property values, but uses a different model which focuses only on homes that were sold both before and after the development was placed in service. Use a similar setup to analyze the data from Davidson County.
 

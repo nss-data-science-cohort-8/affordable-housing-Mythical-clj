@@ -1,0 +1,417 @@
+---
+title: "Affordable Housing Walkthrough"
+output: html_notebook
+---
+Michael's notebook for affordable housing project
+
+```{r}
+library(tidyverse)
+library(sf)
+library(units)
+library(glue)
+```
+
+
+```{r}
+sales <- read_csv("../data/filtered_sales.csv")
+property_details <- read_csv("../data/property_details.csv")
+barnes_full <- read_csv("../data/barnes.csv")
+LIHTC <- read_csv(file = "../data/LIHTC.csv")
+```
+First, grab the data for the development of interest, the Park at Richards Road Apartments.
+```{r}
+hudid = "TNA20130015"
+project <- LIHTC |> 
+  filter(HUD_ID == hudid)
+project <- project |> 
+  select(YR_ALLOC, YR_PIS, lat = LATITUDE, lng = LONGITUDE) |> 
+  st_as_sf(coords = c("lng", "lat"), crs = 4326)
+```
+Prepare the property details data so that it can be converted to an sf object.
+Use separate instead of str_extract and always run unique on your identifying column.
+
+```{r}
+property_details <- property_details |> 
+  separate(centroid, c('lng', 'lat'), ',') |> 
+  mutate(lng = str_remove(lng, '[(]'),
+         lat = str_remove(lat, '[)]'))
+property_details <- property_details %>% 
+  st_as_sf(coords = c("lng", "lat"), crs = 4326) |> 
+  rename(home_loc = geometry)
+# There are some duplicated apns. Thanks, Nitin!
+property_details <- property_details |> 
+  distinct(apn, .keep_all = TRUE)
+```
+And add in the sales data.
+
+Notice inner_join over right_join
+```{r}
+sales_details <- sales |>
+  distinct() |> 
+  inner_join(property_details)
+``` 
+Then calculate distance to the development.
+```{r}
+sales_details <- sales_details %>% 
+  mutate(dist = st_distance(home_loc, project$geometry[1])) |> 
+  mutate(dist = drop_units(dist * 3.28084))
+```
+Now, filter both on distance and year to get data to use with the model
+```{r}
+model_data <- sales_details |> 
+  filter(dist <= 3000) |> 
+  filter(year(ownerdate) %in% c(
+    (project$YR_ALLOC - 5):(project$YR_ALLOC - 1), 
+    (project$YR_PIS + 1):(project$YR_PIS + 5))
+  )
+```
+Then, add the indicator columns.
+```{r}
+model_data <- model_data |> 
+  mutate(
+    treatment = if_else(dist <= 2000, 1, 0),
+    after = if_else(year(ownerdate) %in% (project$YR_ALLOC - 5):(project$YR_ALLOC - 1), 0, 1)
+    )
+```
+Then fit a basic model.
+```{r}
+did_basic <- lm('amount ~ treatment + after + treatment:after', data = model_data)
+summary(did_basic)
+```
+Conclusion: the model estimates that the growth in prices was not as large for homes that were within 2000 feet of the development, but that difference was not statistically significant.
+Let's investigate these results more.
+```{r}
+model_data |> 
+  group_by(treatment, after) |> 
+  summarize(mean(amount), n())
+```
+Let's look at a boxplot to further investigate.
+```{r}
+model_data |>
+  mutate(treatment = factor(treatment), after = factor(after)) |> 
+  ggplot(aes(x = after, y = amount)) +
+  geom_boxplot() +
+  facet_wrap(~treatment)
+```
+```{r}
+model_data |>
+  mutate(treatment = factor(treatment), after = factor(after)) |> 
+  ggplot(aes(x = after, y = amount)) +
+  geom_boxplot() +
+  facet_wrap(~treatment) +
+  ylim(0, 300000)
+```
+We could add on some additional predictors to try and better explain the sales amount.
+```{r}
+model_data <- model_data |> 
+  mutate(sale_year = year(ownerdate)) |> 
+  mutate(age = sale_year - year_built)
+```
+
+
+```{r}
+did_take2 <- lm('amount ~ treatment + after + treatment:after + square_footage + age + building_condition', 
+                data = model_data)
+summary(did_take2)
+```
+No real difference in the conclusions.
+Notice how on the boxplots, the median values seem to be higher for the treatment group. Perhaps our target is skewed.
+Let's now look closer at the target variable.
+```{r}
+model_data |> 
+  ggplot(aes(x = amount)) +
+  geom_histogram()
+```
+It looks pretty skewed. Maybe using the log will help reduce the influence of these outliers.
+```{r}
+model_data |> 
+  ggplot(aes(x = log(amount))) +
+  geom_histogram()
+```
+Perhaps we could do better with a logged model. This can reduce the effect of the skew for the target variable. It also allows the model to look for percent increases rather than absolute increases. 
+```{r}
+did_logged <- lm('log(amount) ~ treatment + after + treatment:after + square_footage + age + building_condition', data = model_data)
+summary(did_logged)
+```
+We still get a similar conclusion: the model estimates that the growth in prices was lower for the treatment group, but the difference is not statistically significant.
+Note too that it estimates that the average sales prices is actually higher for the treatment group now.
+Let's visualize what the model is estimating:
+```{r}
+estimates <- tibble(
+  square_footage = rep(1500, 4),
+  building_condition = rep("Average", 4),
+  age = rep(25, 4),
+  treatment = c(0, 0, 1, 1),
+  after = c(0, 1, 0, 1)
+)
+estimates <- estimates |> 
+  mutate(estimate = predict(did_logged, newdata=estimates))
+estimates |> 
+  mutate(treatment = factor(treatment)) |> 
+  ggplot(aes(x = after, y = estimate, group = treatment, color = treatment)) +
+  geom_line() + geom_point()
+```
+We could compare this to the actual averages:
+```{r}
+model_data |> 
+  mutate(treatment = factor(treatment)) |> 
+  group_by(treatment, after) |> 
+  summarize(log_amount = mean(log(amount))) |> 
+  ggplot(aes(x = after, y = log_amount, group = treatment, color = treatment)) +
+  geom_line() + geom_point()
+```
+We could also look at a boxplot:
+```{r}
+model_data |>
+  mutate(treatment = factor(treatment), after = factor(after)) |> 
+  ggplot(aes(x = after, y = log(amount))) +
+  geom_boxplot() +
+  facet_wrap(~treatment)
+```
+What if we want to implement a tpost variable to measure the number of years since the development was placed in service?
+We can do this by calculating the number of years since the project was place in service. The assumption is that the trend will be different after the development was placed in service, so we can add interaction terms to allow for this difference.
+```{r}
+did_logged_tpost <- lm(
+  glue('log(amount) ~ treatment  + I(sale_year - {project$YR_PIS})  + treatment:after +  treatment:after:I(sale_year - {project$YR_PIS}) + square_footage + age + building_condition'), 
+  data = model_data
+  )
+summary(did_logged_tpost)
+```
+Let's visualize the results. Note that we need to select values for the square footage, age, and building condition. 
+```{r}
+yr_range = min(model_data$sale_year):max(model_data$sale_year)
+control_pred <- tibble(
+  sale_year = yr_range, 
+  square_footage = rep(median(model_data$square_footage), length(yr_range)),
+  building_condition = rep("Average", length(yr_range)),
+  age = rep(median(model_data$age), length(yr_range)),
+  treatment = rep(0, length(yr_range)),
+  ) |> 
+  mutate(after = if_else(sale_year < 2013, 0, 1))
+control_pred <- control_pred |> 
+  mutate(estimate = predict(did_logged_tpost, newdata=control_pred))
+treatment_pred <- tibble(
+  sale_year = yr_range, 
+  square_footage = rep(median(model_data$square_footage), length(yr_range)),
+  building_condition = rep("Average", length(yr_range)),
+  age = rep(median(model_data$age), length(yr_range)),
+  treatment = rep(1, length(yr_range)),
+  ) |> 
+  mutate(after = if_else(sale_year < 2013, 0, 1))
+treatment_pred <- treatment_pred |> 
+  mutate(estimate = predict(did_logged_tpost, newdata=treatment_pred))
+
+estimate_df <- bind_rows(list("control" = control_pred, "treatment" = treatment_pred), .id = 'group')
+```
+
+
+```{r}
+estimate_df |> 
+  ggplot(aes(x = sale_year, y = estimate, group = group, color = group)) +
+  geom_line() + geom_point() +
+  geom_vline(xintercept = project$YR_PIS) + geom_vline(xintercept = project$YR_ALLOC)
+```
+Let's plot this against the actual averages.
+```{r}
+model_data |> 
+  mutate(treatment = factor(treatment)) |> 
+  group_by(treatment, sale_year) |> 
+  summarize(log_amount = mean(log(amount))) |> 
+  ggplot(aes(x = sale_year, y = log_amount, group = treatment, color = treatment)) +
+  geom_line() + geom_point() +
+  geom_line(data = estimate_df |> mutate(treatment = factor(treatment)), 
+            aes(x = sale_year, y = estimate, group = treatment, color = treatment), linetype = 'dashed') +
+  geom_vline(xintercept = project$YR_PIS) + geom_vline(xintercept = project$YR_ALLOC)
+```
+It doesn't appear that a linear trend really captures what happened. Perhaps we could try a quadratic term.
+Again, we'll include interaction terms to allow for the overall trend to change after the development was placed in service.
+```{r}
+did_logged_tpost <- lm(glue('log(amount) ~ treatment  + I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2) + treatment:after + treatment:after:(I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2)) + square_footage + age + building_condition'), data = model_data)
+summary(did_logged_tpost)
+```
+Let's generate some estimates
+```{r}
+yr_range = min(model_data$sale_year):max(model_data$sale_year)
+control_pred <- tibble(
+  sale_year = yr_range, 
+  square_footage = rep(median(model_data$square_footage), length(yr_range)),
+  building_condition = rep("Average", length(yr_range)),
+  age = rep(median(model_data$age), length(yr_range)),
+  treatment = rep(0, length(yr_range)),
+  ) |> 
+  mutate(after = if_else(sale_year < project$YR_PIS, 0, 1))
+control_pred <- control_pred |> 
+  bind_cols(predict(did_logged_tpost, newdata=control_pred, interval = "confidence") |> as_tibble())
+treatment_pred <- tibble(
+  sale_year = yr_range, 
+  square_footage = rep(median(model_data$square_footage), length(yr_range)),
+  building_condition = rep("Average", length(yr_range)),
+  age = rep(median(model_data$age), length(yr_range)),
+  treatment = rep(1, length(yr_range)),
+  ) |> 
+  mutate(after = if_else(sale_year < project$YR_PIS, 0, 1))
+treatment_pred <- treatment_pred |> 
+  bind_cols(predict(did_logged_tpost, newdata=treatment_pred, interval = "confidence") |> as_tibble())
+estimate_df <- bind_rows(list("control" = control_pred, "treatment" = treatment_pred), .id = 'group')
+```
+Let's see if this seems to describe the actual data better.
+```{r}
+model_data |> 
+  mutate(treatment = factor(treatment)) |> 
+  group_by(treatment, sale_year) |> 
+  summarize(log_amount = mean(log(amount))) |> 
+  ggplot(aes(x = sale_year, y = log_amount, group = treatment, color = treatment)) +
+  geom_line() + geom_point() +
+  geom_line(data = estimate_df |> mutate(treatment = factor(treatment)), 
+            aes(x = sale_year, y = fit, group = treatment, color = treatment), linetype = 'dashed') +
+  geom_vline(xintercept = project$YR_PIS) + geom_vline(xintercept = project$YR_ALLOC)
+```
+I can run an anova to see if the new terms are statistically significant.
+```{r}
+reduced_model <- lm(glue('log(amount) ~ treatment  + I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2) + square_footage + age + building_condition'), data = model_data)
+anova(reduced_model, did_logged_tpost)
+```
+We can also include a confidence interval to estimate whether this trend had a statistically significant difference on the mean. Here, the dashed line continues the trend while the blue shaded area gives a confidence interval for the estimated mean. 
+```{r}
+estimate_df |> 
+  ggplot(aes(x = sale_year, y = fit, group = group, color = group)) +
+  geom_line() + geom_point() + 
+  geom_ribbon(data = estimate_df |> filter(group == "treatment", sale_year > project$YR_PIS), aes(ymin = lwr, ymax = upr), alpha = 0.2, fill = "blue") + 
+  geom_line(data = estimate_df |> 
+    filter(group == "control", sale_year >= project$YR_PIS) |> 
+    mutate(fit = fit + did_logged_tpost$coefficients['treatment']),
+    aes(x = sale_year, y = fit), linetype = 'dashed', color = "black") +
+  geom_vline(xintercept = project$YR_PIS) + geom_vline(xintercept = project$YR_ALLOC)
+```
+### Extending to other developments
+I can modularize my code into functions so that I can easily check other developments.
+```{r}
+get_project_data <- function(hudid){
+  project <- LIHTC |> 
+  filter(HUD_ID == hudid)
+  project <- project |> 
+    select(YR_ALLOC, YR_PIS, lat = LATITUDE, lng = LONGITUDE) |> 
+    st_as_sf(coords = c("lng", "lat"), crs = 4326)
+  
+  # To take care of 8888 or 9999 YR_ALLOC or YR_PIS
+  project <- project |> 
+    mutate(YR_PIS = min(YR_ALLOC, YR_ALLOC + 10)) |> 
+    mutate(YR_ALLOC = min(YR_ALLOC, YR_PIS))
+  
+  return(project)
+}
+get_model_data <- function(project) {
+  sales_details <- sales_details %>% 
+    mutate(dist = st_distance(home_loc, project$geometry[1])) |> 
+    mutate(dist = drop_units(dist * 3.28084))
+  
+  model_data <- sales_details |> 
+    filter(dist <= 3000) |> 
+    filter(year(ownerdate) %in% c(
+      (project$YR_ALLOC - 5):(project$YR_ALLOC - 1), 
+      (project$YR_PIS + 1):(project$YR_PIS + 5)
+    )
+    )
+  
+  model_data <- model_data |> 
+    mutate(
+      treatment = if_else(dist <= 2000, 1, 0),
+      after = if_else(year(ownerdate) %in% (project$YR_ALLOC - 5):(project$YR_ALLOC - 1), 0, 1)
+      )
+  
+  model_data <- model_data |> 
+    mutate(sale_year = year(ownerdate)) |> 
+    mutate(age = sale_year - year_built)
+  
+  return(model_data)
+}
+get_estimates <- function(model, model_data, project){
+  
+  yr_range = min(model_data$sale_year):max(model_data$sale_year)
+  
+  control_pred <- tibble(
+    sale_year = yr_range, 
+    square_footage = rep(median(model_data$square_footage), length(yr_range)),
+    building_condition = rep("Average", length(yr_range)),
+    age = rep(median(model_data$age), length(yr_range)),
+    treatment = rep(0, length(yr_range)),
+    ) |> 
+    mutate(after = if_else(sale_year < project$YR_PIS, 0, 1))
+  
+control_pred <- control_pred |> 
+  bind_cols(predict(model, newdata=control_pred, interval = "confidence") |> as_tibble())
+  
+  treatment_pred <- tibble(
+    sale_year = yr_range, 
+    square_footage = rep(median(model_data$square_footage), length(yr_range)),
+    building_condition = rep("Average", length(yr_range)),
+    age = rep(median(model_data$age), length(yr_range)),
+    treatment = rep(1, length(yr_range)),
+    ) |> 
+    mutate(after = if_else(sale_year < project$YR_PIS, 0, 1))
+  
+treatment_pred <- treatment_pred |> 
+  bind_cols(predict(model, newdata=treatment_pred, interval = "confidence") |> as_tibble())
+  
+  estimate_df <- bind_rows(list("control" = control_pred, "treatment" = treatment_pred), .id = 'group')
+  
+  return(estimate_df)
+}
+```
+Let's look at a couple of example developments. 
+```{r}
+hudid <- "TNA20160013"
+project <- get_project_data(hudid)
+model_data <- get_model_data(project)
+did_logged_tpost <- lm(glue('log(amount) ~ treatment  + I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2) + treatment:after + treatment:after:(I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2)) + square_footage + age + building_condition'), data = model_data)
+summary(did_logged_tpost)
+reduced_model <- lm(glue('log(amount) ~ treatment  + I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2) + square_footage + age + building_condition'), data = model_data)
+anova(reduced_model, did_logged_tpost)
+estimate_df <- get_estimates(did_logged_tpost, model_data, project)
+model_data |> 
+  mutate(treatment = factor(treatment)) |> 
+  group_by(treatment, sale_year) |> 
+  summarize(log_amount = mean(log(amount))) |> 
+  ggplot(aes(x = sale_year, y = log_amount, group = treatment, color = treatment)) +
+  geom_line() + geom_point() +
+  geom_line(data = estimate_df |> mutate(treatment = factor(treatment)), 
+            aes(x = sale_year, y = fit, group = treatment, color = treatment), linetype = 'dashed') +
+  geom_vline(xintercept = project$YR_PIS) + geom_vline(xintercept = project$YR_ALLOC)
+estimate_df |> 
+  ggplot(aes(x = sale_year, y = fit, group = group, color = group)) +
+  geom_line() + geom_point() + 
+  geom_ribbon(data = estimate_df |> filter(group == "treatment", sale_year > project$YR_PIS), aes(ymin = lwr, ymax = upr), alpha = 0.2, fill = "blue") + 
+  geom_line(data = estimate_df |> 
+    filter(group == "control", sale_year >= project$YR_PIS) |> 
+    mutate(fit = fit + did_logged_tpost$coefficients['treatment']),
+    aes(x = sale_year, y = fit), linetype = 'dashed', color = "black") +
+  geom_vline(xintercept = project$YR_PIS) + geom_vline(xintercept = project$YR_ALLOC)
+```
+```{r}
+hudid <- "TNA20110543"
+project <- get_project_data(hudid)
+model_data <- get_model_data(project)
+did_logged_tpost <- lm(glue('log(amount) ~ treatment  + I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2) + treatment:after + treatment:after:(I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2)) + square_footage + age + building_condition'), data = model_data)
+summary(did_logged_tpost)
+reduced_model <- lm(glue('log(amount) ~ treatment  + I(sale_year - {project$YR_PIS}) + I((sale_year - {project$YR_PIS})^2) + square_footage + age + building_condition'), data = model_data)
+anova(reduced_model, did_logged_tpost)
+estimate_df <- get_estimates(did_logged_tpost, model_data, project)
+model_data |> 
+  mutate(treatment = factor(treatment)) |> 
+  group_by(treatment, sale_year) |> 
+  summarize(log_amount = mean(log(amount))) |> 
+  ggplot(aes(x = sale_year, y = log_amount, group = treatment, color = treatment)) +
+  geom_line() + geom_point() +
+  geom_line(data = estimate_df |> mutate(treatment = factor(treatment)), 
+            aes(x = sale_year, y = fit, group = treatment, color = treatment), linetype = 'dashed') +
+  geom_vline(xintercept = project$YR_PIS) + geom_vline(xintercept = project$YR_ALLOC) 
+estimate_df |> 
+  ggplot(aes(x = sale_year, y = fit, group = group, color = group)) +
+  geom_line() + geom_point() + 
+  geom_ribbon(data = estimate_df |> filter(group == "treatment", sale_year > project$YR_PIS), aes(ymin = lwr, ymax = upr), alpha = 0.2, fill = "blue") + 
+  geom_line(data = estimate_df |> 
+    filter(group == "control", sale_year >= project$YR_PIS) |> 
+    mutate(fit = fit + did_logged_tpost$coefficients['treatment']),
+    aes(x = sale_year, y = fit), linetype = 'dashed', color = "black") +
+  geom_vline(xintercept = project$YR_PIS) + geom_vline(xintercept = project$YR_ALLOC)
+```
